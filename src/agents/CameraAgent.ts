@@ -43,22 +43,39 @@ import type { AppMode, PoseLandmark } from "@/lib/types";
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Dwell duration (ms) required to confirm a cut gesture. */
+/** Dwell duration (ms) required to confirm the Xbox Gesture cut. */
 const GESTURE_DWELL_MS = 2_000;
 
-/** Minimum MediaPipe visibility score for a wrist landmark to count. */
+/** Minimum MediaPipe visibility score for the wrist landmark to be trusted. */
 const MIN_VISIBILITY = 0.75;
 
-/** Target Zone in normalised coords — top-right corner of the frame. */
+/**
+ * Xbox Gesture bounding box — pixel-space, relative to the video frame.
+ *
+ * "x > videoWidth - 100, y < 100" as specified:
+ *   The wrist must be in the rightmost 100 px column AND the top 100 px row.
+ * Stored as offsets; actual threshold is computed per-frame from _videoEl.
+ */
+const XBOX_ZONE_RIGHT_MARGIN_PX = 100; // wrist.pixelX must exceed videoWidth - this
+const XBOX_ZONE_TOP_MARGIN_PX   = 100; // wrist.pixelY must be below this
+
+/**
+ * MediaPipe Pose RIGHT_WRIST landmark index.
+ * Index 16 per the MediaPipe 33-keypoint topology.
+ * https://developers.google.com/mediapipe/solutions/vision/pose_landmarker
+ */
+const RIGHT_WRIST_IDX = 16;
+
+/**
+ * Normalised Target Zone — used ONLY for the canvas HUD overlay and the
+ * legacy GESTURE_CUT path. The gesture itself uses pixel-space thresholds.
+ */
 const TARGET_ZONE = {
   xMin: 0.80,
   xMax: 1.00,
   yMin: 0.00,
   yMax: 0.22,
 } as const;
-
-/** MediaPipe Pose landmark indices for the two wrists. */
-const WRIST_INDICES = [15, 16] as const; // 15 = LEFT_WRIST, 16 = RIGHT_WRIST
 
 /** Preferred webcam constraints — 720p, 30 fps, front-facing. */
 const VIDEO_CONSTRAINTS: MediaTrackConstraints = {
@@ -272,59 +289,96 @@ export class CameraAgent {
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Process a single landmark frame. Called internally by _handlePoseResults,
-   * but also public so it can be driven by tests without a real camera.
+   * Xbox Gesture detection — called internally by _handlePoseResults each frame,
+   * but also public so it can be driven by unit tests without a real camera.
+   *
+   * Detection logic (exact specification):
+   *   • Landmark: RIGHT_WRIST only (index 16).
+   *   • Bounding box (pixel-space): x > videoWidth - 100  AND  y < 100.
+   *   • MediaPipe outputs normalised [0,1] coords; we convert to pixels using
+   *     the video element's natural resolution (videoWidth × videoHeight).
+   *   • Minimum visibility score: 0.75 — landmarks below this are discarded.
+   *   • Dwell threshold: 2 000 ms of *continuous* presence in the box.
+   *     The timer resets immediately if the wrist leaves the box.
+   *
+   * On threshold reached:
+   *   1. Emits TRIGGER_CUT { confidence } — the canonical event (new).
+   *   2. Emits GESTURE_CUT { confidence } — retained for backward compat.
+   *   3. Resets the dwell timer so the same gesture can trigger the next cut.
+   *
+   * Per-frame side-effect:
+   *   Emits STATE_UPDATED { targetZoneDwellMs } every ≥ 16 ms so the UI
+   *   countdown ring animates smoothly. Emits 0 on zone exit or trigger.
    */
   onPoseLandmarks(landmarks: PoseLandmark[]): void {
     const now = Date.now();
 
-    const wristInZone = WRIST_INDICES.some((idx) => {
-      const lm = landmarks[idx];
-      if (!lm || lm.visibility < MIN_VISIBILITY) return false;
-      return (
-        lm.x >= TARGET_ZONE.xMin &&
-        lm.x <= TARGET_ZONE.xMax &&
-        lm.y >= TARGET_ZONE.yMin &&
-        lm.y <= TARGET_ZONE.yMax
-      );
-    });
+    // ── 1. Resolve the RIGHT_WRIST landmark ──────────────────────────────────
+    const rw = landmarks[RIGHT_WRIST_IDX];
 
-    if (wristInZone) {
+    // Reject missing or low-confidence landmarks immediately.
+    if (!rw || rw.visibility < MIN_VISIBILITY) {
+      this._resetDwell();
+      return;
+    }
+
+    // ── 2. Convert normalised coords → pixel space ───────────────────────────
+    //
+    // _videoEl holds the live <video> element passed to initPose().
+    // videoWidth / videoHeight reflect the decoded stream resolution (e.g. 1280×720),
+    // not the CSS layout dimensions — exactly right for a pixel-space threshold.
+    //
+    // Fallback: if _videoEl is null (unit-test path), use normalised coords scaled
+    // to a canonical 1280×720 frame so the threshold is equivalent to the spec.
+    const frameW = this._videoEl?.videoWidth  || 1280;
+    const frameH = this._videoEl?.videoHeight || 720;
+
+    const pixelX = rw.x * frameW;
+    const pixelY = rw.y * frameH;
+
+    // ── 3. Xbox Gesture bounding box test ────────────────────────────────────
+    //   x > videoWidth  - 100   →  pixelX > frameW - XBOX_ZONE_RIGHT_MARGIN_PX
+    //   y < 100                 →  pixelY < XBOX_ZONE_TOP_MARGIN_PX
+    const inBox =
+      pixelX > frameW - XBOX_ZONE_RIGHT_MARGIN_PX &&
+      pixelY < XBOX_ZONE_TOP_MARGIN_PX;
+
+    // ── 4. Dwell state machine ────────────────────────────────────────────────
+    if (inBox) {
       if (this._dwellStart === null) this._dwellStart = now;
 
       const elapsed = now - this._dwellStart;
       const clamped = Math.min(elapsed, GESTURE_DWELL_MS);
 
+      // Throttle STATE_UPDATED to one emit per animation frame (≥ 16 ms).
       if (clamped - this._lastDwellMs >= 16) {
         this._lastDwellMs = clamped;
         eventBus.emit("STATE_UPDATED", { targetZoneDwellMs: clamped });
       }
 
+      // ── 5. Fire on threshold ─────────────────────────────────────────────
       if (elapsed >= GESTURE_DWELL_MS) {
-        const triggeringLm = WRIST_INDICES
-          .map((i) => landmarks[i])
-          .find(
-            (lm) =>
-              lm &&
-              lm.visibility >= MIN_VISIBILITY &&
-              lm.x >= TARGET_ZONE.xMin &&
-              lm.y <= TARGET_ZONE.yMax,
-          );
+        // TRIGGER_CUT — canonical Xbox Gesture event dispatched to Director Agent.
+        eventBus.emit("TRIGGER_CUT", { confidence: rw.visibility });
+        // GESTURE_CUT — legacy compat (Director Agent subscribes to both).
+        eventBus.emit("GESTURE_CUT", { confidence: rw.visibility });
 
-        eventBus.emit("GESTURE_CUT", {
-          confidence: triggeringLm?.visibility ?? 1,
-        });
-
-        this._dwellStart  = null;
-        this._lastDwellMs = 0;
-        eventBus.emit("STATE_UPDATED", { targetZoneDwellMs: 0 });
+        this._resetDwell();
       }
     } else {
-      if (this._dwellStart !== null) {
-        this._dwellStart  = null;
-        this._lastDwellMs = 0;
-        eventBus.emit("STATE_UPDATED", { targetZoneDwellMs: 0 });
-      }
+      this._resetDwell();
+    }
+  }
+
+  /**
+   * Clears the dwell timer and notifies the UI.
+   * Called when the wrist leaves the zone, visibility drops, or a cut fires.
+   */
+  private _resetDwell(): void {
+    if (this._dwellStart !== null || this._lastDwellMs !== 0) {
+      this._dwellStart  = null;
+      this._lastDwellMs = 0;
+      eventBus.emit("STATE_UPDATED", { targetZoneDwellMs: 0 });
     }
   }
 
@@ -430,5 +484,9 @@ export class CameraAgent {
   get isRecording(): boolean  { return this._recorder?.state === "recording"; }
   get isPoseActive(): boolean { return this._pose !== null; }
 
+  /**
+   * Normalised Target Zone for the canvas HUD overlay (not the gesture box).
+   * The gesture uses pixel-space thresholds; this is purely for the visual ring.
+   */
   static get targetZone() { return TARGET_ZONE; }
 }

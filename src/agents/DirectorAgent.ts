@@ -81,7 +81,11 @@ export class DirectorAgent {
    * Call once on mount (done inside DirectorAgentContext).
    */
   mount(): void {
-    eventBus.on("GESTURE_CUT", this.handleGestureCut);
+    // TRIGGER_CUT is the canonical Xbox Gesture event (right wrist, pixel box).
+    // GESTURE_CUT is retained for backward compatibility with any test harnesses.
+    // Both route through the same handler.
+    eventBus.on("TRIGGER_CUT",  this.handleGestureCut);
+    eventBus.on("GESTURE_CUT",  this.handleGestureCut);
     eventBus.on("VELOCITY_SNAPSHOT", this.handleVelocitySnapshot);
     eventBus.on("AUDIO_TICK", this.handleAudioTick);
     eventBus.on("AUDIO_ENDED", this.handleAudioEnded);
@@ -96,7 +100,8 @@ export class DirectorAgent {
    * Call on unmount (done inside DirectorAgentContext).
    */
   unmount(): void {
-    eventBus.off("GESTURE_CUT", this.handleGestureCut);
+    eventBus.off("TRIGGER_CUT",  this.handleGestureCut);
+    eventBus.off("GESTURE_CUT",  this.handleGestureCut);
     eventBus.off("VELOCITY_SNAPSHOT", this.handleVelocitySnapshot);
     eventBus.off("AUDIO_TICK", this.handleAudioTick);
     eventBus.off("AUDIO_ENDED", this.handleAudioEnded);

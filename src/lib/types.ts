@@ -124,7 +124,17 @@ export interface CadenceEvents extends Record<string | symbol, any> {
   // Camera Agent → *
   POSE_UPDATE: { landmarks: PoseLandmark[] };
   VELOCITY_SNAPSHOT: VelocitySnapshot & { segmentId: string };
+  /**
+   * Legacy gesture event — still emitted alongside TRIGGER_CUT for
+   * backward compatibility with any existing subscribers.
+   */
   GESTURE_CUT: { confidence: number };
+  /**
+   * Xbox Gesture confirmed: RIGHT_WRIST held in the top-right pixel box
+   * (x > videoWidth - 100, y < 100) for 2 continuous seconds.
+   * This is the canonical event the Director Agent acts on.
+   */
+  TRIGGER_CUT: { confidence: number };
   RECORDING_READY: { blob: Blob; segmentId: string };
 
   // Audio Agent → *
