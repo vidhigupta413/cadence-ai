@@ -67,6 +67,7 @@ export const selectMode = (s: CadenceStore) => s.mode;
 export const selectAudioCurrentTime = (s: CadenceStore) => s.audioCurrentTime;
 export const selectAudioLoaded = (s: CadenceStore) => s.audioLoaded;
 export const selectAudioDuration = (s: CadenceStore) => s.audioDuration;
+export const selectCameraReady = (s: CadenceStore) => s.cameraReady;
 export const selectTargetZoneDwellMs = (s: CadenceStore) =>
   s.targetZoneDwellMs;
 export const selectRetakeTargetId = (s: CadenceStore) => s.retakeTargetId;
