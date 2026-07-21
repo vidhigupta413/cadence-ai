@@ -47,14 +47,13 @@ const COLOUR = {
 // Index ranges from @mediapipe/pose POSE_LANDMARKS_LEFT / RIGHT
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Indices 11–22 are the body landmarks; odd = right, even = left by MediaPipe convention.
-// Rather than importing the full enum, we use the known index ranges:
-//   Left  body landmarks: 11,13,15,17,19,21,23,25,27,29,31
-//   Right body landmarks: 12,14,16,18,20,22,24,26,28,30,32
+// MediaPipe body landmark parity (indices 11–32):
+//   ODD  indices → LEFT  side: 11(L_shoulder), 13(L_elbow), 15(L_wrist)…
+//   EVEN indices → RIGHT side: 12(R_shoulder), 14(R_elbow), 16(R_wrist)…
 // Face landmarks (0–10) are treated as neutral.
 function landmarkSide(idx: number): "left" | "right" | "neutral" {
   if (idx < 11) return "neutral";
-  return idx % 2 === 1 ? "right" : "left";
+  return idx % 2 === 1 ? "left" : "right";
 }
 
 function connectionColour(startIdx: number, endIdx: number): string {
@@ -108,10 +107,9 @@ export function drawPose(
 
   if (!landmarks || landmarks.length === 0) return;
 
-  // ── Mirror transform (match scaleX(-1) on the <video>) ───────────────────
-  ctx.save();
-  ctx.scale(-1, 1);
-  ctx.translate(-width, 0);
+  // No internal mirror transform needed: the <canvas> element itself carries
+  // `transform: scaleX(-1)` in CSS (matching the mirrored <video>), so
+  // landmark x-coords from MediaPipe map directly to canvas pixel space.
 
   // ── Helper: normalised → pixel ─────────────────────────────────────────────
   const px = (x: number) => x * width;
@@ -197,7 +195,5 @@ export function drawPose(
     if (isActive) ctx.shadowBlur = 0;
   }
 
-  // Restore the mirrored transform.
   ctx.globalAlpha = 1;
-  ctx.restore();
 }

@@ -276,26 +276,35 @@ export function CameraFeed() {
   }, [cameraAgent]);
 
   // ── Keep canvas pixel dimensions in sync with the rendered video size ────
-  // CSS layout width ≠ canvas.width attribute — a mismatch stretches/squishes
-  // the skeleton. We use ResizeObserver on the container to stay accurate even
-  // when the viewport resizes.
+  // ResizeObserver alone is insufficient: the container starts hidden (display:none)
+  // so its first contentRect is 0×0 and the canvas never gets valid dimensions.
+  // We also imperatively set dimensions whenever permission flips to "active".
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
+    const syncCanvas = (width: number, height: number) => {
+      if (canvasRef.current && width > 0 && height > 0) {
+        canvasRef.current.width  = Math.round(width);
+        canvasRef.current.height = Math.round(height);
+      }
+    };
+
+    // Immediate sync for the current size (handles the active→visible transition).
+    const rect = container.getBoundingClientRect();
+    syncCanvas(rect.width, rect.height);
+
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        if (canvasRef.current) {
-          canvasRef.current.width  = Math.round(width);
-          canvasRef.current.height = Math.round(height);
-        }
+        syncCanvas(entry.contentRect.width, entry.contentRect.height);
       }
     });
 
     ro.observe(container);
     return () => ro.disconnect();
-  }, []);
+  // permission in the dep array re-runs this effect when the container
+  // flips from hidden to visible, so getBoundingClientRect() returns real dims.
+  }, [permission]);
 
   // ── Request camera access ────────────────────────────────────────────────
   const handleEnable = useCallback(async () => {
@@ -319,7 +328,7 @@ export function CameraFeed() {
   // We wire this to the video's onCanPlay event, which fires when the browser
   // has decoded enough data to start rendering frames. At that point
   // videoEl.readyState >= HAVE_CURRENT_DATA and pose.send() will succeed.
-  const handleVideoCanPlay = useCallback(async () => {
+  const handleVideoMetadata = useCallback(async () => {
     const videoEl = videoRef.current;
     if (!videoEl || poseReady || poseLoading) return;
 
@@ -407,15 +416,17 @@ export function CameraFeed() {
           aria-label="Live camera feed"
           className="absolute inset-0 w-full h-full object-cover"
           style={{ transform: "scaleX(-1)" }}
-          onCanPlay={handleVideoCanPlay}
+          onLoadedMetadata={handleVideoMetadata}
         />
 
-        {/* Canvas skeleton overlay — same mirror as the video */}
+        {/* Canvas skeleton overlay — NOT CSS-mirrored.
+            drawPose() receives normalised coords in MediaPipe space (un-mirrored).
+            The video is CSS-mirrored, so we draw the skeleton in the same
+            un-mirrored pixel space and the visual overlay lines up correctly. */}
         <canvas
           ref={canvasRef}
           aria-hidden="true"
           className="absolute inset-0 w-full h-full pointer-events-none"
-          style={{ transform: "scaleX(-1)" }}
         />
 
         {/* Pose loading spinner (while WASM initialises) */}

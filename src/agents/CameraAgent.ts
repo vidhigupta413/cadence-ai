@@ -46,29 +46,43 @@ import type { AppMode, PoseLandmark } from "@/lib/types";
 /** Dwell duration (ms) required to confirm the Xbox Gesture cut. */
 const GESTURE_DWELL_MS = 2_000;
 
-/** Minimum MediaPipe visibility score for the wrist landmark to be trusted. */
-const MIN_VISIBILITY = 0.75;
+/**
+ * Minimum MediaPipe visibility score for the wrist landmark to be trusted.
+ * 0.5 is the practical threshold for a front-facing laptop webcam; MediaPipe
+ * frequently returns 0.55–0.65 for wrists even in good lighting at this model
+ * complexity. Values above 0.65 cause false negatives for most users.
+ */
+const MIN_VISIBILITY = 0.5;
 
 /**
- * Xbox Gesture bounding box — pixel-space, relative to the video frame.
+ * Xbox Gesture bounding box — pixel-space, in MediaPipe's raw (un-mirrored) frame.
  *
- * "x > videoWidth - 100, y < 100" as specified:
- *   The wrist must be in the rightmost 100 px column AND the top 100 px row.
- * Stored as offsets; actual threshold is computed per-frame from _videoEl.
+ * The video element is CSS-mirrored (scaleX(-1)), so what the user sees as the
+ * top-RIGHT corner of the feed is actually the top-LEFT of the raw camera frame
+ * that MediaPipe processes.
+ *
+ * Spec says: "x > width - 100, y < 100" — that describes the VISUAL top-right.
+ * In raw MediaPipe coords the same region is: x < 100px, y < 100px.
  */
-const XBOX_ZONE_RIGHT_MARGIN_PX = 100; // wrist.pixelX must exceed videoWidth - this
-const XBOX_ZONE_TOP_MARGIN_PX   = 100; // wrist.pixelY must be below this
+const XBOX_ZONE_LEFT_MARGIN_PX = 100; // raw pixelX must be LESS THAN this (= visual right)
+const XBOX_ZONE_TOP_MARGIN_PX  = 100; // raw pixelY must be LESS THAN this
 
 /**
- * MediaPipe Pose RIGHT_WRIST landmark index.
- * Index 16 per the MediaPipe 33-keypoint topology.
- * https://developers.google.com/mediapipe/solutions/vision/pose_landmarker
+ * MediaPipe Pose wrist landmark index to watch.
+ *
+ * The video is mirrored, so the user's PHYSICAL right hand appears on the
+ * visual right side — but in MediaPipe's raw un-mirrored frame it is on the
+ * LEFT side → index 15 (LEFT_WRIST in MediaPipe's topology).
+ *
+ * Index 15 = LEFT_WRIST (user's physical right hand, visual right of mirrored feed)
+ * Index 16 = RIGHT_WRIST (user's physical left hand, visual left of mirrored feed)
  */
-const RIGHT_WRIST_IDX = 16;
+const GESTURE_WRIST_IDX = 15; // LEFT_WRIST in raw frame = user's right hand on screen
 
 /**
- * Normalised Target Zone — used ONLY for the canvas HUD overlay and the
- * legacy GESTURE_CUT path. The gesture itself uses pixel-space thresholds.
+ * Normalised Target Zone — used ONLY for the canvas HUD overlay.
+ * Expressed in the VISUAL (mirrored) coordinate space so the box renders
+ * in the correct corner of the displayed feed.
  */
 const TARGET_ZONE = {
   xMin: 0.80,
@@ -313,8 +327,10 @@ export class CameraAgent {
   onPoseLandmarks(landmarks: PoseLandmark[]): void {
     const now = Date.now();
 
-    // ── 1. Resolve the RIGHT_WRIST landmark ──────────────────────────────────
-    const rw = landmarks[RIGHT_WRIST_IDX];
+    // ── 1. Resolve the gesture wrist landmark ────────────────────────────────
+    // GESTURE_WRIST_IDX = 15 (MediaPipe LEFT_WRIST) = user's physical right hand,
+    // which appears on the visual RIGHT because the feed is CSS-mirrored.
+    const rw = landmarks[GESTURE_WRIST_IDX];
 
     // Reject missing or low-confidence landmarks immediately.
     if (!rw || rw.visibility < MIN_VISIBILITY) {
@@ -323,13 +339,8 @@ export class CameraAgent {
     }
 
     // ── 2. Convert normalised coords → pixel space ───────────────────────────
-    //
-    // _videoEl holds the live <video> element passed to initPose().
-    // videoWidth / videoHeight reflect the decoded stream resolution (e.g. 1280×720),
-    // not the CSS layout dimensions — exactly right for a pixel-space threshold.
-    //
-    // Fallback: if _videoEl is null (unit-test path), use normalised coords scaled
-    // to a canonical 1280×720 frame so the threshold is equivalent to the spec.
+    // videoWidth/videoHeight are the raw decoded resolution (e.g. 1280×720).
+    // Fallback to 1280×720 for the unit-test path where _videoEl is null.
     const frameW = this._videoEl?.videoWidth  || 1280;
     const frameH = this._videoEl?.videoHeight || 720;
 
@@ -337,10 +348,10 @@ export class CameraAgent {
     const pixelY = rw.y * frameH;
 
     // ── 3. Xbox Gesture bounding box test ────────────────────────────────────
-    //   x > videoWidth  - 100   →  pixelX > frameW - XBOX_ZONE_RIGHT_MARGIN_PX
-    //   y < 100                 →  pixelY < XBOX_ZONE_TOP_MARGIN_PX
+    // Visual spec: "x > width-100, y < 100" (top-right of the mirrored display).
+    // In raw MediaPipe coords, that same corner is top-LEFT: x < 100, y < 100.
     const inBox =
-      pixelX > frameW - XBOX_ZONE_RIGHT_MARGIN_PX &&
+      pixelX < XBOX_ZONE_LEFT_MARGIN_PX &&
       pixelY < XBOX_ZONE_TOP_MARGIN_PX;
 
     // ── 4. Dwell state machine ────────────────────────────────────────────────
@@ -392,11 +403,30 @@ export class CameraAgent {
    * 2. Emits POSE_UPDATE for the Analyst Agent.
    * 3. Calls the canvas draw callback for the visual overlay.
    */
+  private _poseDebugLogged = false;
+
   private _handlePoseResults = (results: Results): void => {
     this._sending = false; // allow the next rAF frame to send
 
     const rawLandmarks = results.poseLandmarks;
     if (!rawLandmarks || rawLandmarks.length === 0) return;
+
+    // One-shot debug log — confirms pose is running and shows wrist visibility.
+    // Remove or gate behind a flag once detection is confirmed working.
+    if (!this._poseDebugLogged) {
+      this._poseDebugLogged = true;
+      const rw = rawLandmarks[GESTURE_WRIST_IDX];
+      const frameW = this._videoEl?.videoWidth  || 0;
+      const frameH = this._videoEl?.videoHeight || 0;
+      console.debug(
+        "[CameraAgent] First pose result ✓",
+        `| videoRes: ${frameW}×${frameH}`,
+        `| gesture wrist (idx ${GESTURE_WRIST_IDX}) vis: ${rw?.visibility?.toFixed(3) ?? "n/a"}`,
+        `| raw xy: (${rw?.x?.toFixed(3)}, ${rw?.y?.toFixed(3)})`,
+        `| raw pixelXY: (${((rw?.x ?? 0) * frameW).toFixed(0)}, ${((rw?.y ?? 0) * frameH).toFixed(0)})`,
+        `| box: pixelX < ${XBOX_ZONE_LEFT_MARGIN_PX} AND pixelY < ${XBOX_ZONE_TOP_MARGIN_PX}`,
+      );
+    }
 
     // Convert to our internal type and forward to gesture detection.
     const landmarks: PoseLandmark[] = rawLandmarks.map(toLandmark);
